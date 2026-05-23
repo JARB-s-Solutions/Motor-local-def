@@ -1,0 +1,18 @@
+bin/
+obj/
+.vs/
+.vscode/
+*.user
+*.suo
+*.pdb
+TestResults/
+*.log
+
+# Publicaciones pesadas generadas por dotnet publish.
+publish/
+artifacts/
+ejecutable/
+
+# Configuracion local opcional.
+.env
+.env.*
