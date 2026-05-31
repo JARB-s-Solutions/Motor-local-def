@@ -5,12 +5,14 @@ using Microsoft.Extensions.DependencyInjection;
 using DPUruNet;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Configuration;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -26,6 +28,9 @@ builder.Services.AddHostedService<DeteccionContinuaService>();
 var app = builder.Build();
 app.UseCors("PermitirTodo");
 
+// ACTIVAR SOPORTE PARA WEBSOCKETS EN EL SERVIDOR
+app.UseWebSockets();
+
 async Task EnviarMensaje(HttpContext ctx, string texto) {
     Console.WriteLine(texto);
     var json = JsonSerializer.Serialize(new { tipo = "mensaje", texto = texto });
@@ -33,14 +38,42 @@ async Task EnviarMensaje(HttpContext ctx, string texto) {
     await ctx.Response.Body.FlushAsync();
 }
 
-app.MapGet("/", () => "¡Motor DPUruNet Moderno Activo y Escuchando!");
+app.MapGet("/", () => "¡Motor DPUruNet Moderno Activo, Escuchando y con WebSockets!");
 
 app.MapGet("/estado", () => Results.Ok(new {
     cacheCargada = MemoriaHuellas.EstaCargada,
     huellasEnMemoria = MemoriaHuellas.ListaFmds.Count,
     lectorConectado = MotorBiometrico.LectorConectado,
-    detectorContinuo = "activo"
+    detectorContinuo = "activo",
+    kioscosConectados = WebSocketHandler.ConexionesActivas // Nuevo indicador
 }));
+
+// ========================================================
+// ENDPOINT: WEBSOCKET (El Portero de Kioscos)
+// ========================================================
+app.Map("/ws/eventos", async context => {
+    if (context.WebSockets.IsWebSocketRequest) {
+        using var webSocket = await context.WebSockets.AcceptWebSocketAsync();
+        WebSocketHandler.AddSocket(webSocket);
+        Console.WriteLine($"[WEBSOCKET] 🟢 Nuevo Kiosco conectado. Total: {WebSocketHandler.ConexionesActivas}");
+        
+        var buffer = new byte[1024 * 4];
+        try {
+            // Mantiene la conexión viva y abierta escuchando
+            while (webSocket.State == System.Net.WebSockets.WebSocketState.Open) {
+                var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+                if (result.MessageType == System.Net.WebSockets.WebSocketMessageType.Close) break;
+            }
+        } catch { 
+            // Se ignora si el Kiosco cierra la pestaña de golpe
+        } finally {
+            WebSocketHandler.RemoveSocket(webSocket);
+            Console.WriteLine($"[WEBSOCKET] 🔴 Kiosco desconectado. Total: {WebSocketHandler.ConexionesActivas}");
+        }
+    } else {
+        context.Response.StatusCode = 400; // Bad Request si intentan entrar por HTTP normal
+    }
+});
 
 // ========================================================
 // ENDPOINT: Cargar Huellas y "Calentar" el USB
@@ -61,8 +94,6 @@ app.MapPost("/cargar-cache", ([FromBody] PeticionMatch request) => {
     }
     
     MemoriaHuellas.EstaCargada = true;
-    
-    // ¡MAGIA! Encendemos el lector USB en segundo plano mientras se cargan los datos
     MotorBiometrico.InicializarLector();
     
     Console.WriteLine($"\n[SISTEMA] Se cargaron {index} huellas. Motor USB pre-calentado.");
@@ -70,11 +101,10 @@ app.MapPost("/cargar-cache", ([FromBody] PeticionMatch request) => {
 });
 
 // ========================================================
-// 1. ENDPOINT: COMPARAR (Lector Always-On)
+// ENDPOINT: COMPARAR (Lector Always-On)
 // ========================================================
 app.MapPost("/comparar", async (HttpContext ctx) => {
     ctx.Response.ContentType = "application/x-ndjson";
-    
     try {
         if (!MemoriaHuellas.EstaCargada || MemoriaHuellas.ListaFmds.Count == 0) {
             await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { tipo = "resultado", success = false, message = "Sin huellas en memoria." }) + "\n");
@@ -82,7 +112,6 @@ app.MapPost("/comparar", async (HttpContext ctx) => {
         }
 
         await EnviarMensaje(ctx, "Ponga el dedo en el lector...");
-        
         Fmd? fmdCapturado = await MotorBiometrico.CapturarHuellaAsync(async (msg) => await EnviarMensaje(ctx, msg));
         
         if (fmdCapturado == null) {
@@ -107,11 +136,10 @@ app.MapPost("/comparar", async (HttpContext ctx) => {
 });
 
 // ========================================================
-// 2. ENDPOINT: ENROLAR (Lector Always-On)
+// ENDPOINT: ENROLAR (Lector Always-On)
 // ========================================================
 app.MapGet("/enrolar", async (HttpContext ctx) => {
     ctx.Response.ContentType = "application/x-ndjson";
-
     try {
         await EnviarMensaje(ctx, "Iniciando enrolamiento...");
         Fmd? enrolamiento = await MotorBiometrico.EnrolarSocioAsync(async (msg) => await EnviarMensaje(ctx, msg));
@@ -132,6 +160,43 @@ string listenUrl = builder.Configuration["Motor:ListenUrl"] ?? "http://0.0.0.0:4
 Console.WriteLine($"[SISTEMA] Motor escuchando en: {listenUrl}");
 app.Run(listenUrl);
 
+// ========================================================
+// CLASE: WEBSOCKET HANDLER (El Administrador de Push)
+// ========================================================
+public static class WebSocketHandler {
+    private static readonly List<System.Net.WebSockets.WebSocket> Sockets = new();
+    private static readonly object Lock = new();
+
+    public static int ConexionesActivas { get { lock (Lock) return Sockets.Count; } }
+
+    public static void AddSocket(System.Net.WebSockets.WebSocket socket) { lock (Lock) Sockets.Add(socket); }
+    public static void RemoveSocket(System.Net.WebSockets.WebSocket socket) { lock (Lock) Sockets.Remove(socket); }
+
+    public static async Task BroadcastAsync(object data) {
+        // Aseguramos que el JSON se envíe en CamelCase (codigoSocio) para que JavaScript lo lea nativamente
+        var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+        var json = JsonSerializer.Serialize(data, options);
+        var buffer = Encoding.UTF8.GetBytes(json);
+        var segment = new ArraySegment<byte>(buffer);
+
+        List<System.Net.WebSockets.WebSocket> currentSockets;
+        lock (Lock) { currentSockets = Sockets.ToList(); }
+
+        foreach (var socket in currentSockets) {
+            if (socket.State == System.Net.WebSockets.WebSocketState.Open) {
+                try {
+                    await socket.SendAsync(segment, System.Net.WebSockets.WebSocketMessageType.Text, true, CancellationToken.None);
+                } catch { 
+                    // Ignoramos fallos individuales de red para no detener el broadcast a otros kioscos
+                }
+            }
+        }
+    }
+}
+
+// ========================================================
+// MODELOS DE DATOS
+// ========================================================
 public class PeticionMatch { public List<SocioDb> BaseDeDatos { get; set; } = new List<SocioDb>(); }
 public class SocioDb { public string CodigoSocio { get; set; } = ""; public string HuellaTemplate { get; set; } = ""; }
 public class EventoHuella {
@@ -157,7 +222,6 @@ public static class MotorBiometrico {
     private static readonly SemaphoreSlim _lectorLock = new(1, 1);
     public static bool LectorConectado => _lectorGlobal != null;
 
-    // Conecta el hardware 1 sola vez y lo deja abierto
     public static void InicializarLector() {
         try {
             if (_lectorGlobal == null) {
@@ -173,7 +237,6 @@ public static class MotorBiometrico {
         }
     }
 
-    // Auto-recuperación por si desconectan el cable
     public static void ReiniciarLector() {
         if (_lectorGlobal != null) {
             try { _lectorGlobal.Dispose(); } catch { }
@@ -192,10 +255,8 @@ public static class MotorBiometrico {
             }
 
             Fmd? fmdFinal = null;
-            // ¡La lectura ahora arranca instantáneamente!
             CaptureResult captureResult = _lectorGlobal.Capture(Constants.Formats.Fid.ANSI, Constants.CaptureProcessing.DP_IMG_PROC_DEFAULT, 15000, _lectorGlobal.Capabilities.Resolutions[0]);
             
-            // Si el lector fue desconectado a la fuerza, el SDK lanza DP_DEVICE_FAILURE
             if (captureResult.ResultCode == Constants.ResultCode.DP_DEVICE_FAILURE) {
                 await onMessage("Lector desconectado. Reiniciando...");
                 ReiniciarLector();
@@ -209,7 +270,6 @@ public static class MotorBiometrico {
                 await onMessage($"Error de lectura o tiempo agotado.");
             }
             
-            // ELIMINAMOS EL _lectorGlobal.Dispose() PARA MANTENERLO VIVO
             return fmdFinal;
         } finally {
             _lectorLock.Release();
@@ -298,6 +358,9 @@ public static class MotorBiometrico {
     }
 }
 
+// ========================================================
+// SERVICIO DE ESCUCHA CONTINUA EN BACKGROUND
+// ========================================================
 public class DeteccionContinuaService : BackgroundService {
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IConfiguration _configuration;
@@ -337,10 +400,23 @@ public class DeteccionContinuaService : BackgroundService {
 
                 _ = ActivarCooldown(codigoSocio, stoppingToken);
 
+                // DISPARO INSTANTÁNEO POR WEBSOCKET A TODOS LOS KIOSCOS
+                var eventoWs = new {
+                    codigoSocio = codigoSocio,
+                    fechaUtc = DateTime.UtcNow,
+                    success = true,
+                    origen = "lector-automatico"
+                };
+                await WebSocketHandler.BroadcastAsync(eventoWs);
+                Console.WriteLine($"[WEBSOCKET] 🚀 Match empujado a {WebSocketHandler.ConexionesActivas} Kiosco(s): {codigoSocio}");
+
+                // Fallback Legacy: Mantiene la petición HTTP por si decides usarla en el futuro.
+                // (Si FrontendCallbackUrl está vacío en appsettings.json, esto simplemente hace log y no consume internet)
                 await NotificarFrontAsync(new EventoHuella {
                     CodigoSocio = codigoSocio,
                     FechaUtc = DateTime.UtcNow
                 }, stoppingToken);
+
             } catch (OperationCanceledException) {
                 break;
             } catch (Exception ex) {
@@ -353,7 +429,7 @@ public class DeteccionContinuaService : BackgroundService {
     private async Task NotificarFrontAsync(EventoHuella evento, CancellationToken cancellationToken) {
         string? callbackUrl = _configuration["Motor:FrontendCallbackUrl"];
         if (string.IsNullOrWhiteSpace(callbackUrl)) {
-            Console.WriteLine("[DETECTOR] FrontendCallbackUrl no configurado. Evento detectado: " + evento.CodigoSocio);
+            // Ya no es un error, es el comportamiento deseado al usar WebSockets.
             return;
         }
 
@@ -361,13 +437,16 @@ public class DeteccionContinuaService : BackgroundService {
         string payload = JsonSerializer.Serialize(evento);
         using var content = new StringContent(payload, Encoding.UTF8, "application/json");
 
-        HttpResponseMessage response = await client.PostAsync(callbackUrl, content, cancellationToken);
-        if (response.IsSuccessStatusCode) {
-            Console.WriteLine($"[DETECTOR] Evento enviado al front. Socio: {evento.CodigoSocio}");
-            return;
+        try {
+            HttpResponseMessage response = await client.PostAsync(callbackUrl, content, cancellationToken);
+            if (response.IsSuccessStatusCode) {
+                Console.WriteLine($"[HTTP] Evento enviado al front. Socio: {evento.CodigoSocio}");
+            } else {
+                Console.WriteLine($"[HTTP] El front respondió {(int)response.StatusCode} para socio {evento.CodigoSocio}");
+            }
+        } catch {
+            Console.WriteLine($"[HTTP] Falló la conexión al webhook de Vercel.");
         }
-
-        Console.WriteLine($"[DETECTOR] El front respondió {(int)response.StatusCode} para socio {evento.CodigoSocio}");
     }
 
     private async Task ActivarCooldown(string codigoSocio, CancellationToken cancellationToken) {
