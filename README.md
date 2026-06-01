@@ -2,7 +2,7 @@
 
 Este repositorio contiene solamente el codigo necesario del motor local de huellas.
 
-No incluye carpetas generadas como `bin`, `obj` ni `release-win-x64`. La idea es subir esta carpeta a GitHub para que cualquier desarrollador pueda clonarla, compilarla y ejecutarla en su propia PC.
+No incluye carpetas generadas como `bin`, `obj` ni `release-win-x64`.  para que cualquier desarrollador pueda clonarla, compilarla y ejecutarla en su propia PC.
 
 ## Que hace
 
