@@ -1,0 +1,6 @@
+bin/
+obj/
+release-win-x64/
+*.user
+*.suo
+.vs/
