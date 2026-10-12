@@ -1,173 +1,41 @@
-# Motor definitivo nuevo - Hexodus
+# HEXODUS BioSync
 
-Este repositorio contiene solamente el codigo necesario del motor local de huellas.
+Motor local de huellas para Windows 11 x64. La versión de producción está en `MotorLocalExus/` e incluye servicio Windows, auxiliar del lector, ventana de estado, instalador y pruebas aisladas.
 
-No incluye carpetas generadas como `bin`, `obj` ni `release-win-x64`.  para que cualquier desarrollador pueda clonarla, compilarla y ejecutarla en su propia PC.
+## Descarga directa
 
-## Que hace
+- `HEXODUS-BioSync-Setup.exe`: instalador compilado para el cliente.
+- `HEXODUS-BioSync-Setup.sha256`: hash SHA-256 para verificar que el instalador no fue alterado.
 
-- Expone el motor local en `http://localhost:4000`.
-- Guarda eventos de huella en memoria local.
-- Permite al frontend consultar `GET /eventos` sin pasar por Vercel/Render.
-- Mantiene el enrolamiento y la comparacion biometrica existente.
-- Deja `FrontendCallbackUrl` vacio para evitar callbacks serverless.
+El instalador se publica mediante Git LFS porque supera el límite normal de archivos de GitHub.
 
-## Requisitos
+## Instalación
 
-- Windows 64 bits.
-- .NET 8 SDK instalado.
-- Driver del lector DigitalPersona/DPUruNet instalado.
-- Lector USB conectado.
+1. Ejecuta `HEXODUS-BioSync-Setup.exe` como administrador.
+2. La detección del lector es opcional; el controlador DigitalPersona se instala por separado.
+3. Configura una sola vez la dirección del frontend HEXODUS, el identificador de terminal y la clave de comunicación.
+4. El servicio queda configurado para iniciar con Windows y espera la pantalla de asistencia por SSE en `localhost:4000`.
+5. Abre HEXODUS y usa los socios reales de la base de datos. El motor no crea datos ficticios ni modifica el esquema de Supabase.
 
-Verificar .NET:
+La ventana de estado se llama **HEXODUS BioSync**, muestra el lector, la pantalla, la caché, pendientes, último evento y logs. Cerrarla solo la oculta; no detiene el servicio.
 
-```powershell
-dotnet --version
-```
+## Código y compilación
 
-## Ejecutar desde codigo fuente
-
-Abrir PowerShell en esta carpeta y correr:
+La guía completa está en [`LEEME-MotorLocalExus.md`](LEEME-MotorLocalExus.md). Para generar el instalador desde Windows con .NET 8 e Inno Setup 6 disponibles (dotnet e ISCC.exe en PATH, o instalados en .tool-cache):
 
 ```powershell
-dotnet run --urls http://0.0.0.0:4000
+powershell -NoProfile -ExecutionPolicy Bypass -File .\compilar-motor-exus.ps1
 ```
 
-Si quieres probar en otro puerto:
+El código de `MotorLocalExus/` conserva los identificadores internos y las rutas de datos de instalaciones anteriores para permitir actualizaciones sin perder configuración ni cola local.
 
-```powershell
-dotnet run --urls http://127.0.0.1:4055
-```
+## Alcance de esta versión
 
-Para detener el motor:
+- Comunicación de asistencia mediante SSE, sin polling continuo del frontend.
+- Caché local de socios con huella y cola durable de eventos.
+- Arranque automático y recuperación del servicio de Windows.
+- Lector opcional durante la instalación; puede conectarse después.
+- Icono `HEXODUS_BioSync.ico` integrado en la aplicación y el instalador.
+- Pruebas aisladas sin insertar datos en Supabase.
 
-```txt
-Ctrl + C
-```
-
-## Generar ejecutable para Windows
-
-Desde esta carpeta:
-
-```powershell
-.\publicar-release.bat
-```
-
-O manualmente:
-
-```powershell
-dotnet publish .\HexodusMotorLocal.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o .\release-win-x64
-```
-
-Despues de publicar, el ejecutable queda en:
-
-```txt
-release-win-x64/HexodusMotorLocal.exe
-```
-
-## Ejecutar el release publicado
-
-Despues de generar `release-win-x64`, puedes correr:
-
-```powershell
-.\ejecutar-motor.bat
-```
-
-O directo:
-
-```powershell
-cd .\release-win-x64
-.\HexodusMotorLocal.exe
-```
-
-## Configuracion
-
-Archivo:
-
-```txt
-appsettings.json
-```
-
-Configuracion esperada:
-
-```json
-{
-  "Motor": {
-    "FrontendCallbackUrl": "",
-    "CooldownMs": 3000,
-    "ListenUrl": "http://0.0.0.0:4000"
-  }
-}
-```
-
-No configures Vercel/Render en `FrontendCallbackUrl` si quieres evitar invocaciones serverless.
-
-## Endpoints
-
-- `GET /estado`: diagnostico del motor, cache, lector y eventos.
-- `GET /eventos?after=0`: eventos locales detectados por el lector.
-- `POST /cargar-cache`: carga huellas desde el frontend.
-- `GET /enrolar`: captura una nueva huella.
-- `POST /comparar`: compatibilidad/manual.
-
-## Pruebas rapidas
-
-Con el motor corriendo:
-
-```powershell
-Invoke-WebRequest http://localhost:4000/estado -UseBasicParsing
-Invoke-WebRequest http://localhost:4000/eventos?take=0 -UseBasicParsing
-```
-
-En el navegador tambien puedes abrir:
-
-```txt
-http://localhost:4000/estado
-http://localhost:4000/eventos?take=0
-```
-
-## Frontend
-
-El frontend debe apuntar al motor local:
-
-```txt
-NEXT_PUBLIC_MOTOR_URL=http://localhost:4000
-```
-
-Si no se configura esa variable, el frontend actual usa `http://localhost:4000` por defecto.
-
-En DevTools > Network, al filtrar `eventos`, deberias ver:
-
-```txt
-http://localhost:4000/eventos?after=...
-```
-
-No deberias ver polling repetido a:
-
-```txt
-/api/asistencia/huella/eventos
-```
-
-## Inicio automatico con Windows
-
-Opcion simple:
-
-1. Publicar el release con `.\publicar-release.bat`.
-2. Presionar `Win + R`.
-3. Escribir `shell:startup`.
-4. Crear un acceso directo a `ejecutar-motor.bat`.
-
-Opcion mas robusta:
-
-- Usar el Programador de tareas de Windows.
-- Trigger: al iniciar sesion.
-- Accion: ejecutar `ejecutar-motor.bat`.
-- Activar reinicio si falla.
-
-## Notas de estabilidad
-
-- El motor mantiene el lector abierto.
-- Si el SDK reporta `DP_DEVICE_FAILURE`, el motor reinicia el lector.
-- Los timeouts normales por no poner el dedo no reinician el lector.
-- La cache de huellas se reemplaza de forma atomica para evitar lecturas a medias cuando el frontend sincroniza.
-- El detector no se queda esperando si el lector esta ocupado por enrolamiento o captura manual.
+El código histórico del motor que está en la raíz se conserva para referencia; `MotorLocalExus/` es el paquete recomendado para producción.
